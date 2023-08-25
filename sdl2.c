@@ -9,11 +9,14 @@
 #include <SDL2/SDL_timer.h>
 
 struct metronome_state {
-    float *clip;
+    float *clip_l;
+    float *clip_h;
     // number of samples after the beat of the current position, may be non-integer
     double beat_offset;
     // uint64_t rand_state;
     double period;
+    int nbeats;
+    int beat;
 };
 
 const size_t CLIP_LEN = 4800;
@@ -47,9 +50,14 @@ void audio_callback(void* userdata, uint8_t *bytes, int bytelen) {
     struct metronome_state *state = (struct metronome_state *)userdata;
     int count = bytelen / 4;
     float *samples = (float *)bytes;
-    float *clip = state->clip;
     double period = state->period;
     // uint64_t *rand_state = &state->rand_state;
+    int nbeats = state->nbeats;
+    int beat = state->beat;
+
+    float *clip = (nbeats > 1 && beat == 0)
+        ? state->clip_h
+        : state->clip_l;
 
     double beat_offset = state->beat_offset;
     for (int i = 0; i < count; i++) {
@@ -73,15 +81,22 @@ void audio_callback(void* userdata, uint8_t *bytes, int bytelen) {
         beat_offset += 1.0;
         if (beat_offset > period) {
             beat_offset -= period;
+            beat = (beat + 1) % nbeats;
+
+            clip = (nbeats > 1 && beat == 0)
+                ? state->clip_h
+                : state->clip_l;
         }
     }
     state->beat_offset = beat_offset;
+    state->beat = beat;
 }
 
-float *read_audio() {
+
+float *read_audio_file(char *name) {
     size_t bytelen = CLIP_LEN * sizeof(float);
     uint8_t *buf = calloc(bytelen, 1);
-    FILE *f = fopen("click-48k-f32.bin", "rb");
+    FILE *f = fopen(name, "rb");
     assert(f != NULL);
     size_t nread = 0;
     while (nread < bytelen) {
@@ -95,20 +110,29 @@ float *read_audio() {
 int main(int argc, char **argv) {
 
     double bpm = 120.0;
+    int nbeats = 1;
     if (argc >= 2) {
         bpm = atof(argv[1]);
         if (!(bpm >= 20.0 && bpm <= 400.0)) {
-            printf("bpm must be between 20 and 400\n");
+            printf("bpm must be between 20 and 400 inclusive\n");
             return 1;
         }
         printf("using bpm %.2f\n", bpm);
     } else {
         printf("using default bpm %.2f\n", bpm);
-    SDL_Init(SDL_INIT_AUDIO);
+    }
+    if (argc >= 3) {
+        nbeats = atoi(argv[2]);
+        if (!(nbeats >= 1 && nbeats <= 16)) {
+            printf("nbeats must be between 1 and 16 inclusive\n");
+            return 1;
+        }
+        printf("using %d beats per bar\n", nbeats);
     }
     double period = 60.0 / bpm * SAMPLE_RATE;
 
-    float *clip = read_audio();
+    float *clip_l = read_audio_file("click-48k-f32.bin");
+    float *clip_h = read_audio_file("click-48k-f32-h.bin");
     SDL_Init(SDL_INIT_AUDIO);
     SDL_AudioSpec want, have;
     SDL_AudioDeviceID dev;
@@ -121,9 +145,12 @@ int main(int argc, char **argv) {
     want.callback = audio_callback;
 
     struct metronome_state *state = malloc(sizeof(struct metronome_state));
-    state->clip = clip;
+    state->clip_l = clip_l;
+    state->clip_h = clip_h;
     state->beat_offset = 0.0;
     state->period = period;
+    state->nbeats = nbeats;
+    state->beat = 0;
     // state->rand_state = 1ul;
     want.userdata = state;
 
@@ -139,11 +166,16 @@ int main(int argc, char **argv) {
     }
 
     SDL_PauseAudioDevice(dev, 0);
-    for (;;) {
-        SDL_Delay(1000);
+
+    // block on stdin
+    char scratch;
+    while (fread(&scratch, 1, 1, stdin) == 1) {
+      if (scratch == 'q' || scratch == 'Q') break;
     }
+
     SDL_CloseAudioDevice(dev);
-    free(state->clip);
+    free(state->clip_l);
+    free(state->clip_h);
     free(state);
 
     return 0;
